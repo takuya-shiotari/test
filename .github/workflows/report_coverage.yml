@@ -1,0 +1,55 @@
+name: Report coverage
+
+on:
+  pull_request:
+    types: opened
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        required: true
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Update status pending
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/$GITHUB_REPOSITORY/statuses/$GITHUB_WORKFLOW_SHA \
+            -f "state=pending" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" -f "description=report_coverage"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download github_pages_artifact
+        id: download_github_pages_artifact
+        run: |
+          gh release download ${{ github.event.inputs.release_tag || github.event.pull_request.head.sha }} &&
+            tar xzf github_pages_artifact.tgz &&
+            mv github_pages_artifact/coverage . ||
+            echo "skip_octocov=true" >> $GITHUB_OUTPUT
+      - name: Coverage Report by octocov
+        uses: k1LoW/octocov-action@v1
+        if: ${{ steps.download_github_pages_artifact.outputs.skip_octocov != 'true' }}
+      - name: Update status success
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/$GITHUB_REPOSITORY/statuses/$GITHUB_WORKFLOW_SHA \
+            -f "state=success" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" -f "description=report_coverage"
+      - name: Update status error
+        if: failure()
+        run: |
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/$GITHUB_REPOSITORY/statuses/$GITHUB_WORKFLOW_SHA \
+            -f "state=error" -f "target_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" -f "description=report_coverage"

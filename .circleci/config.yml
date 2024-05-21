@@ -1,0 +1,155 @@
+version: 2.1
+
+orbs:
+  gh: circleci/github-cli@2.0
+
+references:
+  restore_bundler_cache: &restore_bundler_cache
+    restore_cache:
+      name: Restore bundler cache
+      key: gems-{{ checksum "Gemfile.lock" }}-{{ .Environment.COMMON_CACHE_KEY }}
+  bundle_install: &bundle_install
+    run:
+      name: Bundle Install
+      command: |
+        gem install bundler:2.4.8
+        bundle install --path=vendor/bundle --jobs=2 --retry=3
+  save_bundler_cache: &save_bundler_cache
+    save_cache:
+      name: Save bundler cache
+      key: gems-{{ checksum "Gemfile.lock" }}-{{ .Environment.COMMON_CACHE_KEY }}
+      paths:
+        - vendor/bundle
+
+jobs:
+  test:
+    docker:
+      - image: cimg/ruby:3.1.2-browsers
+        entrypoint: /bin/sh
+        user: root
+    working_directory: ~/sample
+    steps:
+      - checkout
+      - *restore_bundler_cache
+      - *bundle_install
+      - *save_bundler_cache
+      - run:
+          name: Set up DB
+          command: |
+            bundle exec rails db:create db:setup RAILS_ENV=test
+      - run:
+          name: Rubocop
+          command: bundle exec rubocop
+      - run: |
+          mkdir test_results
+          TEST_FILES=$(circleci tests glob "spec/**/*_spec.rb")
+          echo "$TEST_FILES" | circleci tests run --command="xargs bundle exec rspec --profile 10 --format RspecJunitFormatter --out test_results/rspec.xml --failure-exit-code=0" --verbose --split-by=timings
+      - run: bundle exec rspec --only-failures
+      - store_test_results:
+          path: test_results
+      - store_artifacts:
+          path: brakeman
+      - store_artifacts:
+          path: coverage
+      - store_artifacts:
+          path: tmp/screenshots
+      - run:
+          name: Copy coverage results
+          command: |
+            mkdir /tmp/coverage
+            cp coverage/.resultset.json "/tmp/coverage/.resultset-${CIRCLE_NODE_INDEX}.json"
+      - persist_to_workspace:
+          root: /tmp/coverage
+          paths:
+            - .resultset-*.json
+  build_github_pages_artifact:
+    docker:
+      - image: cimg/ruby:3.1.2-browsers
+        entrypoint: /bin/sh
+        user: root
+    resource_class: medium+
+    working_directory: ~/sample
+    steps:
+      - checkout
+      - gh/install
+      - *restore_bundler_cache
+      - *bundle_install
+      - *save_bundler_cache
+      - attach_workspace:
+          at: /tmp/coverage
+      - run:
+          name: Collates all result sets
+          command: bundle exec rails "coverage:report[/tmp/coverage/.resultset-*.json]"
+      - run:
+          name: Checkout swagger-api/swagger-ui
+          command: |
+            cd tmp
+            git clone https://github.com/swagger-api/swagger-ui --depth 1 -b v4.15.5
+      - run:
+          name: Build GitHub Pages artifact
+          command: |
+            mkdir -p tmp/github_pages_artifact/swagger-ui
+            cp -Lr docs/dist/swagger-ui/* tmp/github_pages_artifact/swagger-ui/
+            cp -n tmp/swagger-ui/dist/* tmp/github_pages_artifact/swagger-ui/
+            cp -r coverage tmp/github_pages_artifact/
+            cd tmp
+            tar czf github_pages_artifact.tgz github_pages_artifact/
+      - store_artifacts:
+          path: tmp/github_pages_artifact
+      - run:
+          name: Upload github_pages_artifact to GitHub Release
+          command: |
+            gh release create ${CIRCLE_SHA1} tmp/github_pages_artifact.tgz -d --target ${CIRCLE_BRANCH} -t "GitHub Pages artifact v${CIRCLE_BUILD_NUM}" -n "GitHub Pages artifact"
+
+  run_deploy_github_pages:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - gh/install
+      - run:
+          name: Run deploy_github_pages
+          command: |
+            gh workflow run deploy_github_pages.yml --ref ${CIRCLE_BRANCH} -f "release_tag=${CIRCLE_SHA1}"
+
+  run_report_coverage:
+    docker:
+      - image: cimg/base:stable
+    steps:
+      - checkout
+      - gh/install
+      - run:
+          name: Run report_coverage
+          command: |
+            gh workflow run report_coverage.yml --ref ${CIRCLE_BRANCH} -f "release_tag=${CIRCLE_SHA1}"
+
+workflows:
+  version: 2
+  deploy:
+    jobs:
+      - test:
+          filters:
+            branches:
+              ignore:
+                - release
+      - build_github_pages_artifact:
+          requires:
+            - test
+          filters:
+            branches:
+              ignore:
+                - release
+      - run_deploy_github_pages:
+          requires:
+            - build_github_pages_artifact
+          filters:
+            branches:
+              only:
+                - main
+      - run_report_coverage:
+          requires:
+            - build_github_pages_artifact
+          filters:
+            branches:
+              ignore:
+                - release
